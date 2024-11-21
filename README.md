@@ -29,7 +29,7 @@ Read-process-write took roughly 4-5 min.
 
 **Example output for cellpose segmentation:**
 
-region_shaoe = (1, 1, 91, 317, 325)
+Shape: (279, 2, 91, 317, 325)
 
 Size: ~10 gb
 
