@@ -7,4 +7,4 @@ required cellpose version: 2.2.1
 
 Example output for otsu segmentation:
 
-[<img src="https://github.com/Euro-BioImaging/zarr_parallel_processing">](figures/otsu.png),
+[<img src="figures/otsu.png">](https://github.com/Euro-BioImaging/zarr_parallel_processing)
