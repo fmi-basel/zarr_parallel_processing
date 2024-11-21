@@ -27,7 +27,11 @@ Read-process-write took roughly 4-5 min.
 [<img src="figures/otsu.png">](https://github.com/Euro-BioImaging/zarr_parallel_processing)
 
 
-Example output for cellpose segmentation:
+**Example output for cellpose segmentation:**
+
+region_shaoe = (1, 1, 91, 317, 325)
+
+Size: ~10 gb
 
 [<img src="figures/cellpose.png">](https://github.com/Euro-BioImaging/zarr_parallel_processing)
 
