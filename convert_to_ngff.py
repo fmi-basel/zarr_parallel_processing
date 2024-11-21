@@ -16,8 +16,7 @@ import rmm
 import itertools
 from pathlib import Path
 import glob, zarr
-from ome_zarr_io.ngff.multiscales import Pyramid, Multimeta
-from ome_zarr_io.base.readers import ImageReader
+from zarr_parallel_processing.multiscales import Multimeta
 from typing import Callable, Any
 from collections import defaultdict
 
