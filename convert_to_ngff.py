@@ -9,6 +9,7 @@ import warnings
 from dask import array as da, bag, delayed
 from dask.highlevelgraph import HighLevelGraph
 import dask
+from dask_image import ndfilters
 from dask_cuda import LocalCUDACluster
 from rmm.allocators.cupy import rmm_cupy_allocator
 import rmm
@@ -17,6 +18,8 @@ import itertools
 from pathlib import Path
 import glob, zarr
 from zarr_parallel_processing.multiscales import Multimeta
+from zarr_parallel_processing import utils
+
 from typing import Callable, Any
 from collections import defaultdict
 
@@ -95,7 +98,8 @@ def write_single_region(region: da.Array,
 def write_regions_sequential(
                   image_regions: tuple,
                   region_slices: tuple,
-                  dataset: zarr.Array
+                  dataset: zarr.Array,
+                  **kwargs
                   ):
     executor = get_reusable_executor(max_workers=n_jobs,
                                      kill_workers=True,
@@ -131,109 +135,22 @@ def write_regions(
                      )
     return dataset
 
-def deconvolve_block(img, psf=None, iterations=20):
-    # Pad PSF with zeros to match image shape
-    pad_l, pad_r = np.divmod(np.array(img.shape) - np.array(psf.shape), 2)
-    pad_r += pad_l
-    psf = np.pad(psf, tuple(zip(pad_l, pad_r)), 'constant', constant_values=0)
-    # Recenter PSF at the origin
-    # Needed to ensure PSF doesn't introduce an offset when
-    # convolving with image
-    for i in range(psf.ndim):
-        psf = np.roll(psf, psf.shape[i] // 2, axis=i)
-    # Convolution requires FFT of the PSF
-    psf = np.fft.rfftn(psf)
-    # Perform deconvolution in-place on a copy of the image
-    # (avoids changing the original)
-    img_decon = np.copy(img)
-    for _ in range(iterations):
-        ratio = img / np.fft.irfftn(np.fft.rfftn(img_decon) * psf)
-        img_decon *= np.fft.irfftn((np.fft.rfftn(ratio).conj() * psf).conj())
-    return img_decon
-
-
-import numpy as np
-
-
-def gaussian_psf(shape, mean, cov):
-    """
-    Computes an n-dimensional Gaussian function over a grid defined by the given shape.
-
-    Parameters:
-        shape (tuple of int): Shape of the n-dimensional grid (e.g., (height, width, depth)).
-        mean (float or list-like): Scalar or array-like representing the mean of the Gaussian.
-                                   If scalar, it will be applied to all dimensions.
-        cov (float or list-like): Scalar, 1D array, or 2D array representing the covariance.
-                                  - If scalar, creates an isotropic Gaussian.
-                                  - If 1D, creates a diagonal covariance matrix.
-                                  - If 2D, used directly as the covariance matrix.
-
-    Returns:
-        np.ndarray: An n-dimensional array containing the Gaussian function values.
-    """
-    n = len(shape)
-    if np.isscalar(mean):
-        mean = np.full(n, mean)
-    else:
-        mean = np.asarray(mean)
-    if mean.shape[0] != n:
-        raise ValueError(f"Mean must match the number of dimensions ({n}).")
-    if np.isscalar(cov):
-        cov = np.eye(n) * cov
-    elif np.ndim(cov) == 1:
-        if len(cov) != n:
-            raise ValueError(f"Covariance vector length must match the number of dimensions ({n}).")
-        cov = np.diag(cov)
-    elif np.ndim(cov) == 2:
-        cov = np.asarray(cov)
-        if cov.shape != (n, n):
-            raise ValueError(f"Covariance matrix must be ({n}, {n}).")
-    else:
-        raise ValueError("Covariance must be a scalar, 1D array, or 2D matrix.")
-    grids = np.meshgrid(*[np.arange(s) for s in shape], indexing='ij')
-    coords = np.stack(grids, axis=-1)  # Shape: (*shape, n)
-    flat_coords = coords.reshape(-1, n)
-    det_cov = np.linalg.det(cov)
-    inv_cov = np.linalg.inv(cov)
-    if det_cov <= 0:
-        raise ValueError("Covariance matrix must be positive definite.")
-    norm_factor = 1 / (np.sqrt((2 * np.pi) ** n * det_cov))
-    diff = flat_coords - mean
-    exponent = -0.5 * np.sum(diff @ inv_cov * diff, axis=1)
-    gaussian_values = norm_factor * np.exp(exponent)
-    return gaussian_values.reshape(shape)
 
 
 
-def richardson_lucy(img: da.Array,
-                    psf: da.Array,
-                    iterations: int = 20,
-                    backend: str = 'cupy'
-                    ):
-    if backend == 'cupy':
-        img = img.map_blocks(cp.asarray)
-        psf = psf.map_blocks(cp.asarray)
-    deconvolved = img.map_overlap(
-                                    deconvolve_block,
-                                    psf = psf,
-                                    iterations = iterations,
-                                    meta = img._meta,
-                                    depth = tuple(np.array(psf.shape) // 2),
-                                    boundary = "periodic"
-                                )
-    if backend == 'cupy':
-        deconvolved = deconvolved.map_blocks(cp.asnumpy)
-    return deconvolved
+# def threshold_local(img: da.Array)
 
 
-
-def to_ngff(arr: da.Array,
-            output_path: str | Path,
-            region_shape: tuple = None,
-            scale: tuple = None,
-            units: tuple = None,
-            client: Client = None
-            ) -> zarr.Group:
+def process_and_save_to_ngff(arr: da.Array,
+                            output_path: str | Path,
+                            region_shape: tuple = None,
+                            scale: tuple = None,
+                            units: tuple = None,
+                            client: Client = None,
+                            parallelize_over_regions = True,
+                            func: Callable = utils.otsu,
+                            **func_params
+                            ) -> zarr.Group:
 
     region_slices = get_regions(arr.shape, region_shape, as_slices = True)
 
@@ -256,64 +173,106 @@ def to_ngff(arr: da.Array,
     meta.to_ngff(gr)
 
     image_regions = [arr[region_slice] for region_slice in region_slices]
+    # processed_regions = image_regions
+    processed_regions = [func(reg, **func_params) for reg in image_regions]
+
     if client is not None:
         client.scatter(region_slices)
         client.scatter(image_regions)
 
-    write_regions(image_regions = image_regions,
-                  region_slices = region_slices,
-                  dataset = dataset,
-                  client = client)
+    if not parallelize_over_regions:
+        write_regions(image_regions = processed_regions,
+                              region_slices = region_slices,
+                              dataset = dataset,
+                              client = client)
+    else:
+        write_regions_sequential(image_regions = processed_regions,
+                                  region_slices = region_slices,
+                                  dataset = dataset,
+                                  client = client)
     return gr
 
 
 
-if __name__ == '__main__':
+# if __name__ == '__main__':
 
-    chunks = (1, 1, 96, 128, 128)
-    region_shape = (128, 2, 96, 128, 128)
-    scale = (600, 1, 2, 0.406, 0.406)
-    units = ('s', 'Channel', 'µm', 'µm', 'µm')
-    psf = gaussian_psf((1, 1, 12, 16, 16), (1, 1, 6, 8, 8), (1, 1, 12, 16, 16))
-    psf = da.from_array(psf, chunks = chunks)
+chunks = (1, 1, 48, 128, 128)
+region_shape = (1, 1, 91, 554, 928)
+scale = (600, 1, 2, 0.406, 0.406)
+units = ('s', 'Channel', 'µm', 'µm', 'µm')
+# psf = gaussian_psf((1, 1, 12, 16, 16), (1, 1, 6, 8, 8), (1, 1, 12, 16, 16))
+# psf = da.from_array(psf, chunks = chunks)
 
-    n_jobs = 4
-    threads_per_worker = 1
-    memory_limit = '3GB'
+block_size = (1, 1, 5, 9, 9)
 
-    input_tiff_path_mg = f"/home/oezdemir/data/original/franziska/crop/mG_View1/*"
-    input_tiff_path_h2b = f"/home/oezdemir/data/original/franziska/crop/H2B_View1/*"
+n_jobs = 4
+threads_per_worker = 2
+memory_limit = '8GB'
 
-    output_zarr_path = f"/home/oezdemir/data/original/franziska/concat.zarr"
+input_tiff_path_mg = f"/home/oezdemir/data/original/franziska/crop/mG_View1/*"
+input_tiff_path_h2b = f"/home/oezdemir/data/original/franziska/crop/H2B_View1/*"
 
-    t0 = time.time()
+output_zarr_path = f"/home/oezdemir/data/original/franziska/concat.zarr"
 
-    paths_mg = sorted(glob.glob(input_tiff_path_mg))
-    paths_h2b = sorted(glob.glob(input_tiff_path_h2b))
+t0 = time.time()
 
-    with LocalCluster(n_workers=n_jobs, threads_per_worker=threads_per_worker, memory_limit=memory_limit) as cluster:
-        cluster.scale(n_jobs)
-        with Client(cluster) as client:
+paths_mg = sorted(glob.glob(input_tiff_path_mg))
+paths_h2b = sorted(glob.glob(input_tiff_path_h2b))
 
-            ### Read image collections
-            imgs_mg = [read_image(path) for path in paths_mg]
-            imgs_h2b = [read_image(path) for path in paths_h2b]
 
-            ### Concatenate collections into a single dask array
-            mg_merged = da.concatenate(imgs_mg, axis = 0) # concatenate along the time dimension
-            h2b_merged = da.concatenate(imgs_h2b, axis = 0) # concatenate along the time dimension
-            imgs_merged = da.concatenate((mg_merged, h2b_merged), axis = 1) # concatenate along the channel dimension
 
-            ### Process merged images
+# imgs_mg = [read_image(path) for path in paths_mg]
+# imgs_h2b = [read_image(path) for path in paths_h2b]
+#
+# ### Concatenate collections into a single dask array
+# mg_merged = da.concatenate(imgs_mg, axis=0)  # concatenate along the time dimension
+# h2b_merged = da.concatenate(imgs_h2b, axis=0)  # concatenate along the time dimension
+# imgs_merged = da.concatenate((mg_merged, h2b_merged), axis=1)  # concatenate along the channel dimension
 
-            ###
-            to_ngff(imgs_merged,
-                    output_path = output_zarr_path,
-                    region_shape = region_shape,
-                    scale = scale,
-                    units = units,
-                    client = client
-                    )
+# processed_img = da.concatenate([otsu(img, return_thresholded=True) for img in imgs_merged], axis=0)
+
+
+with LocalCluster(processes=True,
+                  nanny=True,
+                  n_workers=n_jobs,
+                  threads_per_worker=threads_per_worker,
+                  memory_limit=memory_limit) as cluster:
+    cluster.scale(n_jobs)
+    with Client(cluster,
+                heartbeat_interval="120s",
+                timeout="600s",
+                ) as client:
+
+        ### Read image collections
+        imgs_mg = [read_image(path) for path in paths_mg]
+        imgs_h2b = [read_image(path) for path in paths_h2b]
+
+        ### Concatenate collections into a single dask array
+        mg_merged = da.concatenate(imgs_mg, axis = 0) # concatenate along the time dimension
+        h2b_merged = da.concatenate(imgs_h2b, axis = 0) # concatenate along the time dimension
+        imgs_merged = da.concatenate((mg_merged, h2b_merged), axis = 1) # concatenate along the channel dimension
+
+        ### Process merged images
+        processed_img = imgs_merged
+        # processed_img = ndfilters.threshold_local(imgs_merged, block_size=block_size, method='mean')
+        # processed_img = ndfilters.gaussian_filter(imgs_merged, sigma = (0.4, 0.4, 1, 1, 1))
+        # filtered = ndfilters.uniform_filter(imgs_merged, size = block_size)
+        # processed_img = imgs_merged > filtered
+        # processed_mg = da.concatenate([utils.mean_threshold(img, return_thresholded=True) for img in imgs_mg], axis = 0)
+        # processed_h2b = da.concatenate([utils.mean_threshold(img, return_thresholded=True) for img in imgs_h2b], axis = 0)
+        # processed_mg = da.concatenate([utils.otsu(img, bincount = 9, return_thresholded=True) for img in imgs_mg], axis = 0)
+        # processed_h2b = da.concatenate([utils.otsu(img, bincount = 9, return_thresholded=True) for img in imgs_h2b], axis = 0)
+        # processed_img = da.concatenate((processed_mg, processed_h2b), axis = 1) # concatenate along the channel dimension
+
+        process_and_save_to_ngff(processed_img,
+                output_path = output_zarr_path,
+                region_shape = region_shape,
+                scale = scale,
+                units = units,
+                client = client,
+                parallelize_over_regions=False,
+                func = utils.otsu,
+                )
 
 
 
