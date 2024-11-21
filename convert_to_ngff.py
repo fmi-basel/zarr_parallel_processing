@@ -194,85 +194,84 @@ def process_and_save_to_ngff(arr: da.Array,
 
 
 
-# if __name__ == '__main__':
+if __name__ == '__main__':
+    chunks = (1, 1, 48, 128, 128)
+    region_shape = (1, 1, 91, 554, 928)
+    scale = (600, 1, 2, 0.406, 0.406)
+    units = ('s', 'Channel', 'µm', 'µm', 'µm')
+    # psf = gaussian_psf((1, 1, 12, 16, 16), (1, 1, 6, 8, 8), (1, 1, 12, 16, 16))
+    # psf = da.from_array(psf, chunks = chunks)
 
-chunks = (1, 1, 48, 128, 128)
-region_shape = (1, 1, 91, 554, 928)
-scale = (600, 1, 2, 0.406, 0.406)
-units = ('s', 'Channel', 'µm', 'µm', 'µm')
-# psf = gaussian_psf((1, 1, 12, 16, 16), (1, 1, 6, 8, 8), (1, 1, 12, 16, 16))
-# psf = da.from_array(psf, chunks = chunks)
+    block_size = (1, 1, 5, 9, 9)
 
-block_size = (1, 1, 5, 9, 9)
+    n_jobs = 4
+    threads_per_worker = 2
+    memory_limit = '8GB'
 
-n_jobs = 4
-threads_per_worker = 2
-memory_limit = '8GB'
+    input_tiff_path_mg = f"/home/oezdemir/data/original/franziska/crop/mG_View1/*"
+    input_tiff_path_h2b = f"/home/oezdemir/data/original/franziska/crop/H2B_View1/*"
 
-input_tiff_path_mg = f"/home/oezdemir/data/original/franziska/crop/mG_View1/*"
-input_tiff_path_h2b = f"/home/oezdemir/data/original/franziska/crop/H2B_View1/*"
+    output_zarr_path = f"/home/oezdemir/data/original/franziska/concat.zarr"
 
-output_zarr_path = f"/home/oezdemir/data/original/franziska/concat.zarr"
+    t0 = time.time()
 
-t0 = time.time()
-
-paths_mg = sorted(glob.glob(input_tiff_path_mg))
-paths_h2b = sorted(glob.glob(input_tiff_path_h2b))
-
+    paths_mg = sorted(glob.glob(input_tiff_path_mg))
+    paths_h2b = sorted(glob.glob(input_tiff_path_h2b))
 
 
-# imgs_mg = [read_image(path) for path in paths_mg]
-# imgs_h2b = [read_image(path) for path in paths_h2b]
-#
-# ### Concatenate collections into a single dask array
-# mg_merged = da.concatenate(imgs_mg, axis=0)  # concatenate along the time dimension
-# h2b_merged = da.concatenate(imgs_h2b, axis=0)  # concatenate along the time dimension
-# imgs_merged = da.concatenate((mg_merged, h2b_merged), axis=1)  # concatenate along the channel dimension
 
-# processed_img = da.concatenate([otsu(img, return_thresholded=True) for img in imgs_merged], axis=0)
+    # imgs_mg = [read_image(path) for path in paths_mg]
+    # imgs_h2b = [read_image(path) for path in paths_h2b]
+    #
+    # ### Concatenate collections into a single dask array
+    # mg_merged = da.concatenate(imgs_mg, axis=0)  # concatenate along the time dimension
+    # h2b_merged = da.concatenate(imgs_h2b, axis=0)  # concatenate along the time dimension
+    # imgs_merged = da.concatenate((mg_merged, h2b_merged), axis=1)  # concatenate along the channel dimension
+
+    # processed_img = da.concatenate([otsu(img, return_thresholded=True) for img in imgs_merged], axis=0)
 
 
-with LocalCluster(processes=True,
-                  nanny=True,
-                  n_workers=n_jobs,
-                  threads_per_worker=threads_per_worker,
-                  memory_limit=memory_limit) as cluster:
-    cluster.scale(n_jobs)
-    with Client(cluster,
-                heartbeat_interval="120s",
-                timeout="600s",
-                ) as client:
+    with LocalCluster(processes=True,
+                      nanny=True,
+                      n_workers=n_jobs,
+                      threads_per_worker=threads_per_worker,
+                      memory_limit=memory_limit) as cluster:
+        cluster.scale(n_jobs)
+        with Client(cluster,
+                    heartbeat_interval="120s",
+                    timeout="600s",
+                    ) as client:
 
-        ### Read image collections
-        imgs_mg = [read_image(path) for path in paths_mg]
-        imgs_h2b = [read_image(path) for path in paths_h2b]
+            ### Read image collections
+            imgs_mg = [read_image(path) for path in paths_mg]
+            imgs_h2b = [read_image(path) for path in paths_h2b]
 
-        ### Concatenate collections into a single dask array
-        mg_merged = da.concatenate(imgs_mg, axis = 0) # concatenate along the time dimension
-        h2b_merged = da.concatenate(imgs_h2b, axis = 0) # concatenate along the time dimension
-        imgs_merged = da.concatenate((mg_merged, h2b_merged), axis = 1) # concatenate along the channel dimension
+            ### Concatenate collections into a single dask array
+            mg_merged = da.concatenate(imgs_mg, axis = 0) # concatenate along the time dimension
+            h2b_merged = da.concatenate(imgs_h2b, axis = 0) # concatenate along the time dimension
+            imgs_merged = da.concatenate((mg_merged, h2b_merged), axis = 1) # concatenate along the channel dimension
 
-        ### Process merged images
-        processed_img = imgs_merged
-        # processed_img = ndfilters.threshold_local(imgs_merged, block_size=block_size, method='mean')
-        # processed_img = ndfilters.gaussian_filter(imgs_merged, sigma = (0.4, 0.4, 1, 1, 1))
-        # filtered = ndfilters.uniform_filter(imgs_merged, size = block_size)
-        # processed_img = imgs_merged > filtered
-        # processed_mg = da.concatenate([utils.mean_threshold(img, return_thresholded=True) for img in imgs_mg], axis = 0)
-        # processed_h2b = da.concatenate([utils.mean_threshold(img, return_thresholded=True) for img in imgs_h2b], axis = 0)
-        # processed_mg = da.concatenate([utils.otsu(img, bincount = 9, return_thresholded=True) for img in imgs_mg], axis = 0)
-        # processed_h2b = da.concatenate([utils.otsu(img, bincount = 9, return_thresholded=True) for img in imgs_h2b], axis = 0)
-        # processed_img = da.concatenate((processed_mg, processed_h2b), axis = 1) # concatenate along the channel dimension
+            ### Process merged images
+            processed_img = imgs_merged
+            # processed_img = ndfilters.threshold_local(imgs_merged, block_size=block_size, method='mean')
+            # processed_img = ndfilters.gaussian_filter(imgs_merged, sigma = (0.4, 0.4, 1, 1, 1))
+            # filtered = ndfilters.uniform_filter(imgs_merged, size = block_size)
+            # processed_img = imgs_merged > filtered
+            # processed_mg = da.concatenate([utils.mean_threshold(img, return_thresholded=True) for img in imgs_mg], axis = 0)
+            # processed_h2b = da.concatenate([utils.mean_threshold(img, return_thresholded=True) for img in imgs_h2b], axis = 0)
+            # processed_mg = da.concatenate([utils.otsu(img, bincount = 9, return_thresholded=True) for img in imgs_mg], axis = 0)
+            # processed_h2b = da.concatenate([utils.otsu(img, bincount = 9, return_thresholded=True) for img in imgs_h2b], axis = 0)
+            # processed_img = da.concatenate((processed_mg, processed_h2b), axis = 1) # concatenate along the channel dimension
 
-        process_and_save_to_ngff(processed_img,
-                output_path = output_zarr_path,
-                region_shape = region_shape,
-                scale = scale,
-                units = units,
-                client = client,
-                parallelize_over_regions=False,
-                func = utils.otsu,
-                )
+            process_and_save_to_ngff(processed_img,
+                    output_path = output_zarr_path,
+                    region_shape = region_shape,
+                    scale = scale,
+                    units = units,
+                    client = client,
+                    parallelize_over_regions=False,
+                    func = utils.otsu,
+                    )
 
 
 
